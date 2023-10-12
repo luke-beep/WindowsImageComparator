@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "WindowsImageComparator": {
+      "commandName": "Project",
+      "commandLineArgs": "F:\\ E:\\"
+    }
+  }
+}
