@@ -1,28 +1,20 @@
-﻿using static WindowsImageComparator.ImageDifference;
+﻿using CommandLine;
+using WindowsImageComparator.Abstractions;
+using WindowsImageComparator.Models;
+using WindowsImageComparator.Services;
 
 namespace WindowsImageComparator
 {
     internal class Program
     {
-        private const string OutputPath = "differences.txt";
+        private static void Main(string?[] args) =>
+            Parser.Default.ParseArguments<Options>(args)
+                .WithParsed(RunComparison);
 
-        private static void Main(string[] args)
+        private static void RunComparison(Options options)
         {
-            if (args.Length < 2)
-            {
-                Log.Warning("Usage: WindowsImageComparator.exe <baseline_path> <modified_path>");
-                Environment.Exit(1);
-            }
-
-            var baselinePath = args[0];
-            var modifiedPath = args[1];
-
-            ValidateDirectoryExists(baselinePath, "Baseline path");
-            ValidateDirectoryExists(modifiedPath, "Modified path");
-
-            var differences = CompareImages(baselinePath, modifiedPath);
-
-            WriteDifferencesToFile(differences, OutputPath);
+            IImageComparatorService comparatorService = new ImageComparatorService();
+            comparatorService.CompareImages(options.BaselinePath, options.ModifiedPath);
         }
     }
 }

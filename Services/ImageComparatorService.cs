@@ -1,30 +1,32 @@
-﻿using System.Security.Cryptography;
+﻿using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
+using WindowsImageComparator.Abstractions;
+using WindowsImageComparator.Enums;
+using WindowsImageComparator.Models;
+using static WindowsImageComparator.Models.ImageComparatorModel;
 
-namespace WindowsImageComparator
+namespace WindowsImageComparator.Services
 {
-    public class ImageDifference
+    public class ImageComparatorService : IImageComparatorService
     {
         private const int LineCount = 50;
+        private const int DirectorySize = 0;
+        private const string OutputPath = "results.txt";
 
-        public string FilePath { get; }
-        public string? CounterpartPath { get; }
-        public DifferenceType Type { get; }
-        public ItemType Kind { get; }
-        public long Size => Kind == ItemType.File ? new FileInfo(FilePath).Length : 0;
-        public long? CounterpartSize => CounterpartPath != null && Kind == ItemType.File ? new FileInfo(CounterpartPath).Length : null;
-        public string Checksum { get; }
-        public string? CounterpartChecksum { get; }
-        public ImageDifference(string filepath, string? counterpartPath, DifferenceType type, ItemType kind)
+        public void CompareImages(string baselinePath, string modifiedPath)
         {
-            FilePath = filepath;
-            CounterpartPath = counterpartPath;
-            Type = type;
-            Kind = kind;
-            Checksum = Kind == ItemType.File ? ComputeChecksum(filepath) : "";
-            CounterpartChecksum = counterpartPath != null && Kind == ItemType.File ? ComputeChecksum(counterpartPath) : null;
+            ValidateDirectoryExists(baselinePath, "Baseline path");
+            ValidateDirectoryExists(modifiedPath, "Modified path");
+            var differences = new List<ImageComparatorModel>();
+            CompareDirectories(baselinePath, modifiedPath, differences);
+            WriteDifferencesToFile(differences, OutputPath);
         }
-        public ImageDifference(string path, DifferenceType type, ItemType kind) : this(path, null, type, kind) { }
+
+        private static bool FilesAreDifferent(string file1, string file2)
+        {
+            return ComputeChecksum(file1) != ComputeChecksum(file2) || new FileInfo(file1).Length != new FileInfo(file2).Length;
+        }
 
         private static string ComputeChecksum(string filePath)
         {
@@ -34,29 +36,31 @@ namespace WindowsImageComparator
             return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
         }
 
-        private static bool FilesAreDifferent(string file1, string file2)
-        {
-            return ComputeChecksum(file1) != ComputeChecksum(file2) || new FileInfo(file1).Length != new FileInfo(file2).Length;
-        }
-
-        private static void CompareFilesInDirectories(string baselineDir, string modifiedDir, List<ImageDifference> differences)
+        private static void CompareFilesInDirectories(string baselineDir, string modifiedDir, List<ImageComparatorModel> differences)
         {
             var baselineFiles = Directory.GetFiles(baselineDir);
             var modifiedFiles = Directory.GetFiles(modifiedDir);
 
             foreach (var baselineFile in baselineFiles)
             {
-                var counterpartFile = Path.Combine(modifiedDir, Path.GetFileName(baselineFile));
+                var baselineFileName = Path.GetFileName(baselineFile);
+                var counterpartFile = Path.Combine(modifiedDir, baselineFileName);
                 if (!File.Exists(counterpartFile))
                 {
                     Log.Info($"File removed: {baselineFile}");
-                    differences.Add(new ImageDifference(baselineFile, DifferenceType.Removed, ItemType.File));
+                    var fileInfo = new FileInfo(baselineFile);
+                    var checksum = ComputeChecksum(baselineFile);
+                    differences.Add(new ImageComparatorModel(baselineFile, null, DifferenceType.Removed, ItemType.File, fileInfo.Length, checksum));
                 }
                 else
                 {
                     if (!FilesAreDifferent(baselineFile, counterpartFile)) continue;
                     Log.Info($"File modified: {baselineFile}");
-                    differences.Add(new ImageDifference(baselineFile, counterpartFile, DifferenceType.Modified, ItemType.File));
+                    var fileInfo = new FileInfo(baselineFile);
+                    var counterpartFileInfo = new FileInfo(counterpartFile);
+                    var checksum = ComputeChecksum(baselineFile);
+                    var counterpartChecksum = ComputeChecksum(counterpartFile);
+                    differences.Add(new ImageComparatorModel(baselineFile, counterpartFile, DifferenceType.Modified, ItemType.File, fileInfo.Length, checksum, counterpartFileInfo.Length, counterpartChecksum));
                 }
             }
 
@@ -65,31 +69,25 @@ namespace WindowsImageComparator
                 var counterpartFile = Path.Combine(baselineDir, Path.GetFileName(modifiedFile));
                 if (File.Exists(counterpartFile)) continue;
                 Log.Info($"File added: {modifiedFile}");
-                differences.Add(new ImageDifference(modifiedFile, DifferenceType.Added, ItemType.File));
+                var fileInfo = new FileInfo(modifiedFile);
+                var checksum = ComputeChecksum(modifiedFile);
+                differences.Add(new ImageComparatorModel(modifiedFile, null, DifferenceType.Added, ItemType.File, fileInfo.Length, checksum));
             }
         }
 
-
-        public static List<ImageDifference> CompareImages(string baselinePath, string modifiedPath)
-        {
-            var differences = new List<ImageDifference>();
-            CompareDirectories(baselinePath, modifiedPath, differences);
-            return differences;
-        }
-
-        private static void CompareDirectories(string baselineDir, string modifiedDir, List<ImageDifference> differences)
+        private void CompareDirectories(string baselineDir, string modifiedDir, List<ImageComparatorModel> differences)
         {
             if (!Directory.Exists(baselineDir))
             {
                 Log.Info($"Directory added: {modifiedDir}");
-                AddAllFilesInDirectoryAsDifference(modifiedDir, DifferenceType.Added, differences, ItemType.Directory);
+                AddAllFilesInDirectoryAsDifference(modifiedDir, DifferenceType.Added, differences);
                 return;
             }
 
             if (!Directory.Exists(modifiedDir))
             {
                 Log.Info($"Directory removed: {baselineDir}");
-                AddAllFilesInDirectoryAsDifference(baselineDir, DifferenceType.Removed, differences, ItemType.Directory);
+                AddAllFilesInDirectoryAsDifference(baselineDir, DifferenceType.Removed, differences);
                 return;
             }
 
@@ -97,29 +95,31 @@ namespace WindowsImageComparator
             CompareSubDirectories(baselineDir, modifiedDir, differences);
         }
 
-        private static void AddAllFilesInDirectoryAsDifference(string dir, DifferenceType type, List<ImageDifference> differences, ItemType kind)
+        private static void AddAllFilesInDirectoryAsDifference(string dir, DifferenceType type, List<ImageComparatorModel> differences)
         {
             foreach (var file in Directory.GetFiles(dir))
             {
-                differences.Add(new ImageDifference(file, null, type, kind));
+                var fileInfo = new FileInfo(file);
+                var checksum = ComputeChecksum(file);
+                differences.Add(new ImageComparatorModel(file, null, type, ItemType.File, fileInfo.Length, checksum));
                 Log.Info($"File {type.ToString().ToLower()}: {file}");
             }
 
             foreach (var subDir in Directory.GetDirectories(dir))
             {
-                AddAllFilesInDirectoryAsDifference(subDir, type, differences, ItemType.Directory);
+                differences.Add(new ImageComparatorModel(subDir, null, type, ItemType.Directory, DirectorySize, null));
                 Log.Info($"Directory {type.ToString().ToLower()}: {subDir}");
             }
         }
 
-        private static void CompareSubDirectories(string baselineDir, string modifiedDir, List<ImageDifference> differences)
+        private void CompareSubDirectories(string baselineDir, string modifiedDir, List<ImageComparatorModel> differences)
         {
             foreach (var baselineSubDir in Directory.GetDirectories(baselineDir))
             {
                 var counterpartDir = Path.Combine(modifiedDir, new DirectoryInfo(baselineSubDir).Name);
                 if (!Directory.Exists(counterpartDir))
                 {
-                    differences.Add(new ImageDifference(baselineSubDir, DifferenceType.Removed, ItemType.Directory));
+                    differences.Add(new ImageComparatorModel(baselineSubDir, null, DifferenceType.Removed, ItemType.Directory, DirectorySize, null));
                 }
                 CompareDirectories(baselineSubDir, counterpartDir, differences);
             }
@@ -129,33 +129,32 @@ namespace WindowsImageComparator
                 var counterpartDir = Path.Combine(baselineDir, new DirectoryInfo(modifiedSubDir).Name);
                 if (!Directory.Exists(counterpartDir))
                 {
-                    differences.Add(new ImageDifference(modifiedSubDir, DifferenceType.Added, ItemType.Directory));
+                    differences.Add(new ImageComparatorModel(modifiedSubDir, null, DifferenceType.Added, ItemType.Directory, DirectorySize, null));
                 }
+                CompareDirectories(counterpartDir, modifiedSubDir, differences);
             }
         }
 
-        public static void ValidateDirectoryExists(string path, string descriptor)
+        private static void ValidateDirectoryExists(string path, string descriptor)
         {
             if (!Directory.Exists(path))
             {
                 Log.Error($"{descriptor} does not exist: {path}");
-                Environment.Exit(1);
+                throw new ArgumentException($"{descriptor} does not exist: {path}");
             }
-            else
-            {
-                Log.Success($"{descriptor}: {path}");
-            }
+            Log.Success($"{descriptor}: {path}");
         }
 
-        public static void WriteDifferencesToFile(List<ImageDifference> differences, string outputPath)
+        private static void WriteDifferencesToFile(List<ImageComparatorModel> differences, string outputPath)
         {
             try
             {
                 using var writer = new StreamWriter(outputPath, false, Encoding.UTF8);
                 foreach (var diff in differences)
                 {
-                    writer.WriteLine($"{diff.Kind}: {diff.FilePath}");
+                    writer.WriteLine($"{diff.Kind}: {diff.Path}");
                     writer.WriteLine($"Type: {diff.Type}");
+
 
                     if (diff.Kind == ItemType.File)
                     {
@@ -172,7 +171,6 @@ namespace WindowsImageComparator
                             writer.WriteLine($"Modified Checksum: {diff.CounterpartChecksum}");
                         }
                     }
-
                     writer.WriteLine(new string('-', LineCount));
                 }
                 Log.Success($"Comparison completed. Results written to {outputPath}");
@@ -182,20 +180,7 @@ namespace WindowsImageComparator
                 Log.Error($"Failed to write results to {outputPath}: {e.Message}");
                 throw;
             }
-
-        }
-
-        public enum ItemType
-        {
-            File,
-            Directory
-        }
-        public enum DifferenceType
-        {
-            Added,
-            Removed,
-            Modified
+            Process.Start(new ProcessStartInfo(outputPath) { UseShellExecute = true });
         }
     }
 }
-
